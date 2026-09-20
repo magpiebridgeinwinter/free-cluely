@@ -2,9 +2,12 @@
 
 import path from "node:path"
 import fs from "node:fs"
-import { app } from "electron"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+import { app, desktopCapturer, screen } from "electron"
 import { v4 as uuidv4 } from "uuid"
-import screenshot from "screenshot-desktop"
+
+const execFileAsync = promisify(execFile)
 
 export class ScreenshotHelper {
   private screenshotQueue: string[] = []
@@ -74,6 +77,38 @@ export class ScreenshotHelper {
     this.extraScreenshotQueue = []
   }
 
+  // Native capture via Electron's desktopCapturer; if the app's own TCC
+  // identity is denied (common for unsigned dev Electron builds), fall back
+  // to the `screencapture` CLI, which can inherit the launching terminal's
+  // Screen Recording permission when the app is started from a shell.
+  private async captureScreen(filename: string): Promise<void> {
+    const display = screen.getPrimaryDisplay()
+    const width = Math.round(display.size.width * display.scaleFactor)
+    const height = Math.round(display.size.height * display.scaleFactor)
+
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ["screen"],
+        thumbnailSize: { width, height }
+      })
+      if (sources.length && !sources[0].thumbnail.isEmpty()) {
+        fs.writeFileSync(filename, sources[0].thumbnail.toPNG())
+        return
+      }
+      console.warn("[ScreenshotHelper] desktopCapturer returned no usable image, falling back to screencapture CLI")
+    } catch (err: any) {
+      console.warn(`[ScreenshotHelper] desktopCapturer failed (${err?.message || err}), falling back to screencapture CLI`)
+    }
+
+    try {
+      await execFileAsync("screencapture", ["-x", "-t", "png", filename])
+    } catch (err: any) {
+      throw new Error(
+        `Both capture paths failed. desktopCapturer: permission denied for this app; screencapture CLI: ${err?.stderr?.trim() || err?.message}. Grant Screen Recording permission (System Settings → Privacy & Security → Screen Recording) to Electron or your terminal, then restart.`
+      )
+    }
+  }
+
   public async takeScreenshot(
     hideMainWindow: () => void,
     showMainWindow: () => void
@@ -88,7 +123,7 @@ export class ScreenshotHelper {
 
       if (this.view === "queue") {
         screenshotPath = path.join(this.screenshotDir, `${uuidv4()}.png`)
-        await screenshot({ filename: screenshotPath })
+        await this.captureScreen(screenshotPath)
 
         this.screenshotQueue.push(screenshotPath)
         if (this.screenshotQueue.length > this.MAX_SCREENSHOTS) {
@@ -103,7 +138,7 @@ export class ScreenshotHelper {
         }
       } else {
         screenshotPath = path.join(this.extraScreenshotDir, `${uuidv4()}.png`)
-        await screenshot({ filename: screenshotPath })
+        await this.captureScreen(screenshotPath)
 
         this.extraScreenshotQueue.push(screenshotPath)
         if (this.extraScreenshotQueue.length > this.MAX_SCREENSHOTS) {
@@ -119,9 +154,11 @@ export class ScreenshotHelper {
       }
 
       return screenshotPath
-    } catch (error) {
-      console.error("Error taking screenshot:", error)
-      throw new Error(`Failed to take screenshot: ${error.message}`)
+    } catch (error: any) {
+      console.error("Error taking screenshot:", error?.message || error)
+      throw new Error(
+        `Failed to take screenshot: ${error?.message || error?.toString?.() || JSON.stringify(error) || "unknown error"}`
+      )
     } finally {
       // Ensure window is always shown again
       showMainWindow()

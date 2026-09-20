@@ -99,6 +99,15 @@ export class WindowHelper {
 
     this.mainWindow = new BrowserWindow(windowSettings)
     // this.mainWindow.webContents.openDevTools()
+    this.mainWindow.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+      console.log(`[Renderer:${level}] ${message} (${sourceId}:${line})`)
+    })
+    this.mainWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
+      console.error(`[did-fail-load] ${code} ${desc} ${url}`)
+    })
+    this.mainWindow.webContents.on("render-process-gone", (_e, details) => {
+      console.error("[render-process-gone]", details)
+    })
     this.mainWindow.setContentProtection(true)
 
     if (process.platform === "darwin") {

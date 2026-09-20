@@ -23,14 +23,23 @@ export class ProcessingHelper {
     const useOllama = process.env.USE_OLLAMA === "true"
     const ollamaModel = process.env.OLLAMA_MODEL // Don't set default here, let LLMHelper auto-detect
     const ollamaUrl = process.env.OLLAMA_URL || "http://localhost:11434"
-    
+
+    // Qwen (Alibaba DashScope, OpenAI-compatible) takes priority over Gemini when enabled
+    const useQwen = process.env.USE_QWEN === "true"
+
     if (useOllama) {
       console.log("[ProcessingHelper] Initializing with Ollama")
       this.llmHelper = new LLMHelper(undefined, true, ollamaModel, ollamaUrl)
+    } else if (useQwen) {
+      if (!process.env.QWEN_API_KEY) {
+        throw new Error("QWEN_API_KEY not found in environment variables. Set QWEN_API_KEY (get one from https://bailian.console.aliyun.com) or disable USE_QWEN")
+      }
+      console.log("[ProcessingHelper] Initializing with Qwen")
+      this.llmHelper = new LLMHelper(process.env.GEMINI_API_KEY, false)
     } else {
       const apiKey = process.env.GEMINI_API_KEY
       if (!apiKey) {
-        throw new Error("GEMINI_API_KEY not found in environment variables. Set GEMINI_API_KEY or enable Ollama with USE_OLLAMA=true")
+        throw new Error("GEMINI_API_KEY not found in environment variables. Set GEMINI_API_KEY, enable Qwen with USE_QWEN=true, or enable Ollama with USE_OLLAMA=true")
       }
       console.log("[ProcessingHelper] Initializing with Gemini")
       this.llmHelper = new LLMHelper(apiKey, false)

@@ -6,12 +6,68 @@ interface OllamaResponse {
   done: boolean
 }
 
+// Minimal structural interface both the Gemini SDK model and the Qwen
+// adapter below satisfy, so call sites stay unchanged.
+interface ChatCapableModel {
+  generateContent(content: unknown): Promise<{ response: any }>
+}
+
+// Adapter that talks to any OpenAI-compatible /chat/completions endpoint
+// (used here for Alibaba DashScope / Qwen) while mimicking the subset of
+// the Gemini SDK's generateContent() interface this class relies on:
+// content is a string, or an array mixing strings and { inlineData } parts.
+class QwenModel implements ChatCapableModel {
+  constructor(
+    private apiKey: string,
+    private model: string,
+    private baseUrl: string
+  ) {}
+
+  async generateContent(content: unknown) {
+    const parts = Array.isArray(content) ? content : [content]
+    const userContent = parts.map((p: any) => {
+      if (typeof p === "string") return { type: "text", text: p }
+      if (p?.inlineData?.mimeType?.startsWith("image/")) {
+        const { data, mimeType } = p.inlineData
+        return { type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } }
+      }
+      throw new Error(`Qwen adapter: unsupported content part ${p?.inlineData?.mimeType || typeof p} (audio not supported via this endpoint)`)
+    })
+
+    const response = await fetch(`${this.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.apiKey}`
+      },
+      body: JSON.stringify({
+        model: this.model,
+        messages: [{ role: "user", content: userContent }]
+      })
+    })
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "")
+      throw new Error(`Qwen API error: ${response.status} ${response.statusText} ${body.slice(0, 200)}`)
+    }
+
+    const data: any = await response.json()
+    const text = data?.choices?.[0]?.message?.content ?? ""
+    return { response: Promise.resolve({ text: () => text }) }
+  }
+}
+
 export class LLMHelper {
-  private model: GenerativeModel | null = null
-  private readonly systemPrompt = `You are Wingman AI, a helpful, proactive assistant for any kind of problem or situation (not just coding). For any user input, analyze the situation, provide a clear problem statement, relevant context, and suggest several possible responses or actions the user could take next. Always explain your reasoning. Present your suggestions as a list of options or next steps.`
+  private model: ChatCapableModel | null = null
+  private useQwen: boolean = false
+  private qwenModel: string = "qwen-vl-max-latest"
+  private readonly systemPrompt = `You are Wingman AI, a helpful assistant. ANSWERING RULES (strictly ordered): (1) ALWAYS answer the question itself FIRST — lead with the direct answer/solution to what the screenshot or question actually asks; no preamble, no restating the problem, no filler. Only after the direct answer may you add brief context or alternatives. (2) For coding / algorithm problems, give the solution as Java code in LeetCode submission style: "class Solution" containing only the required method signature (no main method, no I/O boilerplate), followed by a one-line complexity analysis (time O(?), space O(?)). (3) ALL explanations, reasoning and prose must be written in Chinese (中文); the code itself stays in English.`
   private useOllama: boolean = false
   private ollamaModel: string = "llama3.2"
   private ollamaUrl: string = "http://localhost:11434"
+  // Model is configurable via GEMINI_MODEL in .env; "gemini-flash-latest" is
+  // Google's rolling alias so deprecated pinned versions don't break the app.
+  private geminiModel: string = process.env.GEMINI_MODEL || "gemini-flash-latest"
 
   constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string) {
     this.useOllama = useOllama
@@ -23,10 +79,16 @@ export class LLMHelper {
       
       // Auto-detect and use first available model if specified model doesn't exist
       this.initializeOllamaModel()
+    } else if (process.env.USE_QWEN === "true" && process.env.QWEN_API_KEY) {
+      this.useQwen = true
+      this.qwenModel = process.env.QWEN_MODEL || "qwen-vl-max-latest"
+      const baseUrl = process.env.QWEN_BASE_URL || "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      this.model = new QwenModel(process.env.QWEN_API_KEY, this.qwenModel, baseUrl)
+      console.log(`[LLMHelper] Using Qwen (${this.qwenModel}) via ${baseUrl}`)
     } else if (apiKey) {
       const genAI = new GoogleGenerativeAI(apiKey)
-      this.model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" })
-      console.log("[LLMHelper] Using Google Gemini")
+      this.model = genAI.getGenerativeModel({ model: this.geminiModel })
+      console.log(`[LLMHelper] Using Google Gemini (${this.geminiModel})`)
     } else {
       throw new Error("Either provide Gemini API key or enable Ollama mode")
     }
@@ -130,7 +192,7 @@ export class LLMHelper {
   "context": "Relevant background or context from the images.",
   "suggested_responses": ["First possible answer or action", "Second possible answer or action", "..."],
   "reasoning": "Explanation of why these suggestions are appropriate."
-}\nImportant: Return ONLY the JSON object, without any markdown formatting or code blocks.`
+}\nAll string values must be written in Chinese (中文). Return ONLY the JSON object, without any markdown formatting or code blocks.`
 
       const result = await this.model.generateContent([prompt, ...imageParts])
       const response = await result.response
@@ -145,13 +207,13 @@ export class LLMHelper {
   public async generateSolution(problemInfo: any) {
     const prompt = `${this.systemPrompt}\n\nGiven this problem or situation:\n${JSON.stringify(problemInfo, null, 2)}\n\nPlease provide your response in the following JSON format:\n{
   "solution": {
-    "code": "The code or main answer here.",
+    "code": "LeetCode-style Java solution: class Solution with the required method signature only (no main/IO), followed by a one-line complexity comment, with Chinese inline comments where helpful.",
     "problem_statement": "Restate the problem or situation.",
     "context": "Relevant background/context.",
     "suggested_responses": ["First possible answer or action", "Second possible answer or action", "..."],
     "reasoning": "Explanation of why these suggestions are appropriate."
   }
-}\nImportant: Return ONLY the JSON object, without any markdown formatting or code blocks.`
+}\nAll string values must be written in Chinese (中文). Return ONLY the JSON object, without any markdown formatting or code blocks.`
 
     console.log("[LLMHelper] Calling Gemini LLM for solution...");
     try {
@@ -174,13 +236,13 @@ export class LLMHelper {
       
       const prompt = `${this.systemPrompt}\n\nYou are a wingman. Given:\n1. The original problem or situation: ${JSON.stringify(problemInfo, null, 2)}\n2. The current response or approach: ${currentCode}\n3. The debug information in the provided images\n\nPlease analyze the debug information and provide feedback in this JSON format:\n{
   "solution": {
-    "code": "The code or main answer here.",
+    "code": "LeetCode-style Java solution: class Solution with the required method signature only (no main/IO), followed by a one-line complexity comment, with Chinese inline comments where helpful.",
     "problem_statement": "Restate the problem or situation.",
     "context": "Relevant background/context.",
     "suggested_responses": ["First possible answer or action", "Second possible answer or action", "..."],
     "reasoning": "Explanation of why these suggestions are appropriate."
   }
-}\nImportant: Return ONLY the JSON object, without any markdown formatting or code blocks.`
+}\nAll string values must be written in Chinese (中文). Return ONLY the JSON object, without any markdown formatting or code blocks.`
 
       const result = await this.model.generateContent([prompt, ...imageParts])
       const response = await result.response
@@ -242,7 +304,7 @@ export class LLMHelper {
           mimeType: "image/png"
         }
       };
-      const prompt = `${this.systemPrompt}\n\nDescribe the content of this image in a short, concise answer. In addition to your main answer, suggest several possible actions or responses the user could take next based on the image. Do not return a structured JSON object, just answer naturally as you would to a user. Be concise and brief.`;
+      const prompt = `${this.systemPrompt}\n\nAnalyze this image and answer the question it contains directly and first. If the image shows a coding/algorithm problem, respond with the LeetCode-style Java solution (class Solution + method signature + complexity line) and a brief Chinese explanation. If it is not a coding problem, give the direct answer in Chinese, then at most a few short follow-up suggestions. Be concise. Answer in Chinese.`;
       const result = await this.model.generateContent([prompt, imagePart]);
       const response = await result.response;
       const text = response.text();
@@ -255,10 +317,13 @@ export class LLMHelper {
 
   public async chatWithGemini(message: string): Promise<string> {
     try {
+      // Prepend the system prompt so typed questions follow the same rules:
+      // direct answer first, LeetCode-style Java for coding, Chinese prose.
+      const prompted = `${this.systemPrompt}\n\n用户问题:${message}`
       if (this.useOllama) {
-        return this.callOllama(message);
+        return this.callOllama(prompted);
       } else if (this.model) {
-        const result = await this.model.generateContent(message);
+        const result = await this.model.generateContent(prompted);
         const response = await result.response;
         return response.text();
       } else {
@@ -293,12 +358,12 @@ export class LLMHelper {
     }
   }
 
-  public getCurrentProvider(): "ollama" | "gemini" {
-    return this.useOllama ? "ollama" : "gemini";
+  public getCurrentProvider(): "ollama" | "gemini" | "qwen" {
+    return this.useOllama ? "ollama" : this.useQwen ? "qwen" : "gemini";
   }
 
   public getCurrentModel(): string {
-    return this.useOllama ? this.ollamaModel : "gemini-2.0-flash";
+    return this.useOllama ? this.ollamaModel : this.useQwen ? this.qwenModel : this.geminiModel;
   }
 
   public async switchToOllama(model?: string, url?: string): Promise<void> {
@@ -318,7 +383,7 @@ export class LLMHelper {
   public async switchToGemini(apiKey?: string): Promise<void> {
     if (apiKey) {
       const genAI = new GoogleGenerativeAI(apiKey);
-      this.model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+      this.model = genAI.getGenerativeModel({ model: this.geminiModel });
     }
     
     if (!this.model && !apiKey) {

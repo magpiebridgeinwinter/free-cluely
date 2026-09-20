@@ -34,7 +34,7 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
   const chatInputRef = useRef<HTMLInputElement>(null)
   
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [currentModel, setCurrentModel] = useState<{ provider: string; model: string }>({ provider: "gemini", model: "gemini-3-pro-preview" })
+  const [currentModel, setCurrentModel] = useState<{ provider: string; model: string }>({ provider: "gemini", model: "gemini-flash-latest" })
 
   const barRef = useRef<HTMLDivElement>(null)
 
@@ -274,7 +274,7 @@ const Queue: React.FC<QueueProps> = ({ setView }) => {
                           ? "bg-gray-700/80 text-gray-100 ml-12 border-gray-600/40" 
                           : "bg-white/85 text-gray-700 mr-12 border-gray-200/50"
                       }`}
-                      style={{ wordBreak: "break-word", lineHeight: "1.4" }}
+                      style={{ wordBreak: "break-word", lineHeight: "1.4", whiteSpace: "pre-wrap" }}
                     >
                       {msg.text}
                     </div>
